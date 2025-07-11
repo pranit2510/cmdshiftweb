@@ -1,0 +1,27 @@
+{
+  "name": "cmdshift-backend",
+  "version": "1.0.0",
+  "description": "Backend API for CmdShift Web - AI-powered code generation",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "api",
+    "express",
+    "ai",
+    "code-generation"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.56.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.0",
+    "express": "^5.1.0",
+    "morgan": "^1.10.0"
+  }
+}

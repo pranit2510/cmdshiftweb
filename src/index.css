@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+/* Sandpack Custom Styles */
+.sp-layout {
+  height: 100% !important;
+}
+
+.sp-editor {
+  height: 100% !important;
+}
+
+.sp-preview-container {
+  height: 100% !important;
+}
+
+.sp-preview-iframe {
+  height: 100% !important;
+}
+
+/* Ensure Sandpack containers fill available space */
+.sp-wrapper {
+  height: 100% !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.sp-stack {
+  height: 100% !important;
+  flex: 1 !important;
+}
