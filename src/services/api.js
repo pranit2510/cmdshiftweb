@@ -98,4 +98,24 @@ export const checkHealth = async () => {
   }
 };
 
+/**
+ * Get AI explanation for generated code
+ * @param {string|object} code - The code to explain (string for single file, object for multi-file)
+ * @returns {Promise<{success: boolean, explanation: object}>}
+ */
+export const explainCode = async (code) => {
+  try {
+    const response = await api.post('/api/explain', { code }, {
+      timeout: 30000 // 30 second timeout for explanations
+    });
+    return response.data;
+  } catch (error) {
+    // Re-throw with user-friendly message attached
+    throw {
+      ...error,
+      userMessage: error.userMessage || 'Failed to generate explanation. Please try again.',
+    };
+  }
+};
+
 export default api;

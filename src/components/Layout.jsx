@@ -3,8 +3,12 @@ import CodePreview from './CodePreview'
 import TemplateGallery from './TemplateGallery'
 import ProjectsList from './ProjectsList'
 import Auth from './Auth'
+import GenerationProgress from './GenerationProgress'
+import CodeExplainer from './CodeExplainer'
 import supabase from '../utils/supabase'
 import { generateCode } from '../services/api'
+import JSZip from 'jszip'
+import { saveAs } from 'file-saver'
 
 function Layout() {
   const [prompt, setPrompt] = useState('')
@@ -151,7 +155,7 @@ function Layout() {
     }
   }
 
-  const downloadCode = () => {
+  const downloadCode = async () => {
     if (!generatedCode) return
 
     const now = new Date()
@@ -161,44 +165,36 @@ function Layout() {
     const isMultiFile = typeof generatedCode === 'object' && !Array.isArray(generatedCode)
     
     if (isMultiFile) {
-      // For multi-file projects, create a downloadable HTML that includes all files
-      // We'll create a simple HTML file that can be opened in a browser
-      const indexHtml = generatedCode['index.html'] || generatedCode['/index.html']
-      
-      if (indexHtml) {
-        const blob = new Blob([indexHtml], { type: 'text/html' })
-        const url = URL.createObjectURL(blob)
-        const link = document.createElement('a')
-        link.href = url
-        link.download = `project-${timestamp}.html`
-        document.body.appendChild(link)
-        link.click()
-        document.body.removeChild(link)
-        URL.revokeObjectURL(url)
-      } else {
-        // If no index.html, download as JSON
+      try {
+        // Create a new ZIP file
+        const zip = new JSZip()
+        
+        // Add each file to the ZIP maintaining the path structure
+        Object.entries(generatedCode).forEach(([filePath, content]) => {
+          // Remove leading slash if present for ZIP compatibility
+          const zipPath = filePath.startsWith('/') ? filePath.slice(1) : filePath
+          
+          // Add file to ZIP
+          zip.file(zipPath, content)
+        })
+        
+        // Generate the ZIP file
+        const blob = await zip.generateAsync({ type: 'blob' })
+        
+        // Save the ZIP file
+        saveAs(blob, `cmdshift-project-${timestamp}.zip`)
+        
+      } catch (error) {
+        console.error('Error creating ZIP file:', error)
+        // Fallback to JSON download if ZIP creation fails
         const blob = new Blob([JSON.stringify(generatedCode, null, 2)], { type: 'application/json' })
-        const url = URL.createObjectURL(blob)
-        const link = document.createElement('a')
-        link.href = url
-        link.download = `project-${timestamp}.json`
-        document.body.appendChild(link)
-        link.click()
-        document.body.removeChild(link)
-        URL.revokeObjectURL(url)
+        saveAs(blob, `project-${timestamp}.json`)
       }
     } else {
       // Single file download (backward compatible)
       const filename = `component-${timestamp}.jsx`
       const blob = new Blob([generatedCode], { type: 'application/javascript' })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = filename
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
-      URL.revokeObjectURL(url)
+      saveAs(blob, filename)
     }
   }
 
@@ -331,17 +327,23 @@ function Layout() {
               </button>
             )}
             
-            {/* Export Code Button */}
+            {/* Action Buttons Row */}
             {generatedCode && (
-              <button 
-                onClick={downloadCode}
-                className="w-full bg-green-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-green-700 transition-colors duration-200 flex items-center justify-center space-x-2"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
-                </svg>
-                <span>Export Code</span>
-              </button>
+              <div className="flex gap-2">
+                {/* Export Code Button */}
+                <button 
+                  onClick={downloadCode}
+                  className="flex-1 bg-green-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-green-700 transition-colors duration-200 flex items-center justify-center space-x-2"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
+                  </svg>
+                  <span>Export Code</span>
+                </button>
+                
+                {/* Code Explainer Button */}
+                <CodeExplainer code={generatedCode} isVisible={true} />
+              </div>
             )}
           </div>
         </div>
@@ -429,6 +431,9 @@ function Layout() {
           </div>
         </div>
       )}
+
+      {/* Generation Progress */}
+      <GenerationProgress isGenerating={isLoading} />
     </div>
   )
 }
