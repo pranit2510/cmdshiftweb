@@ -1,14 +1,18 @@
 import { useState, useEffect } from 'react'
+import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import CodePreview from './CodePreview'
 import TemplateGallery from './TemplateGallery'
 import ProjectsList from './ProjectsList'
 import Auth from './Auth'
 import GenerationProgress from './GenerationProgress'
 import CodeExplainer from './CodeExplainer'
+import ComponentLibrary from './ComponentLibrary'
+import ChatInterface from './ChatInterface'
 import supabase from '../utils/supabase'
-import { generateCode } from '../services/api'
+import { generateCode, chatEdit } from '../services/api'
 import JSZip from 'jszip'
 import { saveAs } from 'file-saver'
+import '../styles/panels.css'
 
 function Layout() {
   const [prompt, setPrompt] = useState('')
@@ -21,6 +25,8 @@ function Layout() {
   const [projects, setProjects] = useState([])
   const [saveSuccess, setSaveSuccess] = useState(false)
   const [showProjects, setShowProjects] = useState(false)
+  const [showComponentLibrary, setShowComponentLibrary] = useState(false)
+  const [chatMessages, setChatMessages] = useState([])
 
   // Check user auth status on mount
   useEffect(() => {
@@ -85,18 +91,39 @@ function Layout() {
   }
 
   const handleTemplateSelect = async (templatePrompt) => {
-    // Set the prompt to the template's prompt text
+    // Add template prompt as a user message
+    const userMessage = {
+      role: 'user',
+      content: templatePrompt,
+      timestamp: new Date().toISOString()
+    }
+    setChatMessages(prev => [...prev, userMessage])
+    
+    // Set the prompt
     setPrompt(templatePrompt)
     
     // Close the template gallery
     setShowTemplates(false)
     
-    // Optionally auto-generate code
-    // Uncomment the following line to auto-generate when selecting a template
-    // await handleGenerateCode()
+    // Auto-generate code
+    setTimeout(() => handleGenerateCode(templatePrompt), 100)
   }
 
   const handleLoadProject = (project) => {
+    // Clear chat and add the loaded project prompt
+    setChatMessages([
+      {
+        role: 'user',
+        content: project.prompt,
+        timestamp: new Date().toISOString()
+      },
+      {
+        role: 'assistant',
+        content: 'I\'ve loaded your saved project. The code is displayed in the preview panel.',
+        timestamp: new Date().toISOString()
+      }
+    ])
+    
     // Set the prompt from the loaded project
     setPrompt(project.prompt)
     
@@ -111,12 +138,14 @@ function Layout() {
     setShowProjects(false)
   }
 
-  const handleGenerateCode = async () => {
+  const handleGenerateCode = async (promptText = null) => {
+    const messagePrompt = promptText || prompt
+    
     // Clear previous error
     setError(null)
     
     // Validate prompt
-    if (!prompt.trim()) {
+    if (!messagePrompt.trim()) {
       setError('Please enter a prompt describing what you want to build.')
       return
     }
@@ -124,10 +153,18 @@ function Layout() {
     setIsLoading(true)
     
     try {
-      console.log('Generating code for prompt:', prompt)
-      const response = await generateCode(prompt)
+      console.log('Generating code for prompt:', messagePrompt)
+      const response = await generateCode(messagePrompt)
       
       if (response.success) {
+        // Add assistant success message
+        const assistantMessage = {
+          role: 'assistant',
+          content: 'I\'ve generated the code for your request. You can view it in the preview panel on the right. Feel free to ask for any modifications or explanations!',
+          timestamp: new Date().toISOString()
+        }
+        setChatMessages(prev => [...prev, assistantMessage])
+        
         // Check if it's a multi-file project or single file
         if (response.files && response.isProject) {
           setGeneratedCode(response.files)
@@ -148,11 +185,109 @@ function Layout() {
       const errorMessage = err.userMessage || err.message || 'Failed to generate code. Please try again.'
       setError(errorMessage)
       
+      // Add error message to chat
+      const errorAssistantMessage = {
+        role: 'assistant',
+        content: `I encountered an error: ${errorMessage}`,
+        timestamp: new Date().toISOString()
+      }
+      setChatMessages(prev => [...prev, errorAssistantMessage])
+      
       // Clear the code if there was an error
       setGeneratedCode('')
     } finally {
       setIsLoading(false)
     }
+  }
+
+  const handleEditCode = async (editMessage) => {
+    // Clear previous error
+    setError(null)
+    setIsLoading(true)
+    
+    try {
+      console.log('Editing code with message:', editMessage)
+      const response = await chatEdit(generatedCode, editMessage, chatMessages)
+      
+      if (response.success) {
+        // Add assistant success message
+        const assistantMessage = {
+          role: 'assistant',
+          content: 'I\'ve updated the code based on your request. The changes are reflected in the preview panel.',
+          timestamp: new Date().toISOString()
+        }
+        setChatMessages(prev => [...prev, assistantMessage])
+        
+        // Update the code
+        if (response.files && response.isProject) {
+          setGeneratedCode(response.files)
+          console.log('Multi-file project edited successfully')
+        } else if (response.code) {
+          setGeneratedCode(response.code)
+          console.log('Code edited successfully')
+        } else {
+          throw new Error('Invalid response format')
+        }
+      } else {
+        throw new Error('Invalid response from server')
+      }
+    } catch (err) {
+      console.error('Error editing code:', err)
+      
+      // Use the user-friendly error message if available
+      const errorMessage = err.userMessage || err.message || 'Failed to edit code. Please try again.'
+      setError(errorMessage)
+      
+      // Add error message to chat
+      const errorAssistantMessage = {
+        role: 'assistant',
+        content: `I encountered an error while editing: ${errorMessage}`,
+        timestamp: new Date().toISOString()
+      }
+      setChatMessages(prev => [...prev, errorAssistantMessage])
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleSendMessage = async (messageContent) => {
+    // Add user message to chat
+    const userMessage = {
+      role: 'user',
+      content: messageContent,
+      timestamp: new Date().toISOString()
+    }
+    setChatMessages(prev => [...prev, userMessage])
+    
+    // Check if we have existing code - if so, edit it; otherwise generate new
+    if (generatedCode) {
+      // Edit existing code
+      await handleEditCode(messageContent)
+    } else {
+      // Generate new code
+      setPrompt(messageContent)
+      await handleGenerateCode(messageContent)
+    }
+  }
+
+  const handleInsertComponent = (componentCode) => {
+    // Add component as a user message
+    const userMessage = {
+      role: 'user',
+      content: `Add this component to my project:\n\n${componentCode}`,
+      timestamp: new Date().toISOString()
+    }
+    setChatMessages(prev => [...prev, userMessage])
+    
+    // Set the prompt and generate code
+    const newPrompt = prompt ? `${prompt}\n\nAlso add this component:\n\n${componentCode}` : componentCode
+    setPrompt(newPrompt)
+    
+    // Close the component library
+    setShowComponentLibrary(false)
+    
+    // Generate code with the updated prompt
+    setTimeout(() => handleGenerateCode(newPrompt), 100)
   }
 
   const downloadCode = async () => {
@@ -199,7 +334,7 @@ function Layout() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50">
+    <div className="h-screen flex flex-col bg-gray-50 overflow-hidden">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm flex-shrink-0">
         <div className="flex items-center space-x-3">
@@ -237,47 +372,34 @@ function Layout() {
       </header>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden min-h-0">
-        {/* Left Panel - Prompt Input */}
-        <div className="w-full lg:w-2/5 bg-white lg:border-r border-gray-200 flex flex-col">
-          <div className="px-6 py-4 border-b border-gray-200 flex-shrink-0">
-            <h2 className="text-lg font-medium text-gray-900">Prompt</h2>
-            <p className="text-sm text-gray-500 mt-1">Describe what you want to build</p>
+      <PanelGroup direction="horizontal" className="flex-1 panel-group" style={{ height: '100%' }}>
+        {/* Left Panel - Chat Interface */}
+        <Panel defaultSize={40} minSize={20} maxSize={70} className="bg-white flex flex-col">
+          <div className="px-6 py-4 border-b border-gray-200 flex-shrink-0 flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-medium text-gray-900">Chat</h2>
+              <p className="text-sm text-gray-500 mt-1">Describe what you want to build</p>
+            </div>
+            <button
+              onClick={() => setShowTemplates(true)}
+              className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium transition-colors duration-200 flex items-center gap-2 text-sm"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z" />
+              </svg>
+              <span>Templates</span>
+            </button>
           </div>
           
-          <div className="flex-1 p-6 overflow-auto">
-            <div className="mb-4">
-              <button
-                onClick={() => setShowTemplates(true)}
-                className="w-full py-2 px-4 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium transition-colors duration-200 flex items-center justify-center space-x-2"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                  <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z" />
-                </svg>
-                <span>Browse Templates</span>
-              </button>
-            </div>
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Try something like: 'Create a modern landing page with a hero section, features grid, and contact form'"
-              className="w-full h-full p-4 border border-gray-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent font-sans min-h-[200px]"
-              disabled={isLoading}
+          <div className="flex-1 overflow-hidden">
+            <ChatInterface 
+              messages={chatMessages}
+              onSendMessage={handleSendMessage}
+              isLoading={isLoading}
+              disabled={false}
             />
           </div>
           
-          {/* Error Message */}
-          {error && (
-            <div className="mx-6 mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
-              <div className="flex items-start">
-                <svg className="h-5 w-5 text-red-500 mt-0.5 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                </svg>
-                <p className="ml-3 text-sm text-red-700">{error}</p>
-              </div>
-            </div>
-          )}
-
           {/* Success Message */}
           {saveSuccess && (
             <div className="mx-6 mb-4 p-4 bg-green-50 border border-green-200 rounded-lg">
@@ -291,27 +413,15 @@ function Layout() {
           )}
           
           <div className="p-6 border-t border-gray-200 flex-shrink-0 space-y-3">
-            <button 
-              onClick={handleGenerateCode}
-              disabled={!prompt.trim() || isLoading}
-              className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg font-medium hover:bg-blue-700 transition-colors duration-200 flex items-center justify-center space-x-2 disabled:bg-gray-400 disabled:cursor-not-allowed"
+            {/* Component Library Button */}
+            <button
+              onClick={() => setShowComponentLibrary(true)}
+              className="w-full bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded-lg font-medium transition-colors duration-200 flex items-center justify-center space-x-2"
             >
-              {isLoading ? (
-                <>
-                  <svg className="animate-spin h-5 w-5 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  <span>Generating...</span>
-                </>
-              ) : (
-                <>
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
-                  </svg>
-                  <span>Generate Code</span>
-                </>
-              )}
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M10 3.5a1.5 1.5 0 013 0V4a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-.5a1.5 1.5 0 000 3h.5a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-.5a1.5 1.5 0 00-3 0v.5a1 1 0 01-1 1H6a1 1 0 01-1-1v-3a1 1 0 00-1-1h-.5a1.5 1.5 0 010-3H4a1 1 0 001-1V6a1 1 0 011-1h3a1 1 0 001-1v-.5z" />
+              </svg>
+              <span>Component Library</span>
             </button>
             
             {/* Save Project Button */}
@@ -346,16 +456,23 @@ function Layout() {
               </div>
             )}
           </div>
-        </div>
+        </Panel>
+
+        {/* Resize Handle */}
+        <PanelResizeHandle className="resize-handle-vertical">
+          <div className="h-full w-full relative flex items-center justify-center">
+            <div className="h-8 w-1 bg-gray-300 rounded-full" />
+          </div>
+        </PanelResizeHandle>
 
         {/* Right Panel - Code Preview */}
-        <div className="flex-1 flex flex-col min-h-0 bg-gray-900">
+        <Panel defaultSize={60} minSize={30} maxSize={80} className="flex flex-col min-h-0 bg-gray-900" style={{ minHeight: 0 }}>
           <CodePreview 
             code={typeof generatedCode === 'string' ? generatedCode : ''} 
             files={typeof generatedCode === 'object' ? generatedCode : null} 
           />
-        </div>
-      </div>
+        </Panel>
+      </PanelGroup>
 
       {/* Template Gallery Modal */}
       {showTemplates && (
@@ -434,6 +551,13 @@ function Layout() {
 
       {/* Generation Progress */}
       <GenerationProgress isGenerating={isLoading} />
+      
+      {/* Component Library */}
+      <ComponentLibrary 
+        isOpen={showComponentLibrary}
+        onClose={() => setShowComponentLibrary(false)}
+        onInsertComponent={handleInsertComponent}
+      />
     </div>
   )
 }

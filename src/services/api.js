@@ -118,4 +118,28 @@ export const explainCode = async (code) => {
   }
 };
 
+/**
+ * Edit existing code based on chat message
+ * @param {string|object} code - The current code (string for single file, object for multi-file)
+ * @param {string} message - The user's edit request
+ * @param {Array} history - The chat history for context
+ * @returns {Promise<{success: boolean, code?: string, files?: object, isProject: boolean}>}
+ */
+export const chatEdit = async (code, message, history = []) => {
+  try {
+    const response = await api.post('/api/chat', { 
+      code, 
+      message, 
+      history 
+    });
+    return response.data;
+  } catch (error) {
+    // Re-throw with user-friendly message attached
+    throw {
+      ...error,
+      userMessage: error.userMessage || 'Failed to edit code. Please try again.',
+    };
+  }
+};
+
 export default api;

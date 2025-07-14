@@ -583,6 +583,198 @@ app.post('/api/generate', async (req, res) => {
   }
 });
 
+// API endpoint for chat-based code editing
+app.post('/api/chat', async (req, res) => {
+  const startTime = Date.now();
+  console.log(`[${new Date().toISOString()}] Chat edit request started`);
+  
+  // Set request timeout
+  req.setTimeout(120000); // 2 minutes
+  res.setTimeout(120000); // 2 minutes
+  
+  try {
+    const { code, message, history } = req.body;
+    
+    // Validate input
+    if (!code || !message) {
+      return res.status(400).json({
+        error: 'Invalid request',
+        message: 'Code and message are required'
+      });
+    }
+    
+    // Log the request
+    console.log(`[Chat Edit Request] Message: ${message.substring(0, 100)}...`);
+    console.log(`[Chat Edit Request] Code type: ${typeof code}`);
+    console.log(`[Chat Edit Request] History length: ${history ? history.length : 0}`);
+    
+    // Check if API key is configured
+    if (!process.env.ANTHROPIC_API_KEY) {
+      console.error('ANTHROPIC_API_KEY not configured');
+      return res.status(500).json({
+        error: 'Configuration error',
+        message: 'AI service is not properly configured'
+      });
+    }
+    
+    // Prepare current code content
+    let currentCodeContent = '';
+    let isMultiFile = false;
+    
+    if (typeof code === 'object' && !Array.isArray(code)) {
+      // Multi-file project
+      isMultiFile = true;
+      const files = Object.entries(code);
+      files.forEach(([filename, content]) => {
+        currentCodeContent += `\n=== File: ${filename} ===\n${content}\n`;
+      });
+    } else {
+      // Single file
+      currentCodeContent = code;
+    }
+    
+    // Build conversation history for context
+    let conversationContext = '';
+    if (history && history.length > 0) {
+      // Take last 5 messages for context
+      const recentHistory = history.slice(-5);
+      conversationContext = 'Recent conversation:\n';
+      recentHistory.forEach(msg => {
+        conversationContext += `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}\n\n`;
+      });
+    }
+    
+    // Create edit prompt
+    const editPrompt = `You are an expert web developer helping to edit and improve code based on user requests.
+
+${conversationContext}
+
+Current code:
+${currentCodeContent}
+
+User's edit request: "${message}"
+
+Please analyze the current code and make the specific changes requested by the user. 
+
+Requirements:
+1. Make ONLY the changes requested - don't add extra features
+2. Preserve all existing functionality unless explicitly asked to change it
+3. Maintain the same code style and structure
+4. Keep the same file organization
+5. Ensure all changes work together properly
+
+${isMultiFile ? `Return the complete updated project as a JSON object with file paths as keys and updated content as values:
+{
+  "filename.ext": "updated content",
+  ...
+}` : 'Return the updated code as a single string.'}
+
+Return ONLY the ${isMultiFile ? 'JSON object' : 'code'}, no explanations or markdown.`;
+    
+    try {
+      // Use Claude Opus 4 model
+      const model = process.env.ANTHROPIC_MODEL || 'claude-opus-4-20250514';
+      console.log(`[Chat Edit] Using model: ${model}`);
+      
+      // Create timeout controller
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 110000); // 110 seconds
+      
+      const claudeMessage = await anthropic.messages.create({
+        model: model,
+        max_tokens: 6000,
+        temperature: 0.7,
+        system: "You are a helpful coding assistant that makes specific edits to existing code based on user requests. Always preserve existing functionality unless asked to change it.",
+        messages: [
+          {
+            role: 'user',
+            content: editPrompt
+          }
+        ]
+      });
+      
+      clearTimeout(timeoutId);
+      
+      // Extract and clean the response
+      let editedContent = claudeMessage.content[0].text;
+      console.log(`[Chat Edit] Response length: ${editedContent.length} characters`);
+      
+      // Clean up markdown if present
+      editedContent = editedContent.replace(/```json\n?/g, '').replace(/```javascript\n?/g, '').replace(/```\n?/g, '').trim();
+      
+      let responseData;
+      
+      if (isMultiFile) {
+        try {
+          // Parse as JSON for multi-file projects
+          const parsedFiles = JSON.parse(editedContent);
+          
+          if (typeof parsedFiles === 'object' && !Array.isArray(parsedFiles)) {
+            console.log(`[Chat Edit Success] Multi-file project edited with ${Object.keys(parsedFiles).length} files`);
+            responseData = {
+              success: true,
+              files: parsedFiles,
+              isProject: true,
+              timestamp: new Date().toISOString()
+            };
+          } else {
+            throw new Error('Invalid project structure');
+          }
+        } catch (jsonError) {
+          console.error('[Chat Edit] JSON parse error:', jsonError.message);
+          throw new Error('Failed to parse edited project files');
+        }
+      } else {
+        // Single file response
+        console.log('[Chat Edit Success] Single file edited');
+        
+        // Ensure proper formatting for React components
+        let processedCode = editedContent;
+        if (!processedCode.startsWith('function') && !processedCode.startsWith('<!DOCTYPE')) {
+          processedCode = processedCode.replace(/^export\s+default\s+/, '');
+        }
+        if (processedCode.startsWith('function')) {
+          processedCode = `export default ${processedCode}`;
+        }
+        
+        responseData = {
+          success: true,
+          code: processedCode,
+          language: 'javascript',
+          framework: 'react',
+          isProject: false,
+          timestamp: new Date().toISOString()
+        };
+      }
+      
+      // Success - return the response
+      const elapsed = Date.now() - startTime;
+      console.log(`[${new Date().toISOString()}] Chat edit request completed in ${elapsed}ms`);
+      res.json(responseData);
+      
+    } catch (error) {
+      console.error('[Chat Edit] Claude API Error:', error.message);
+      
+      // Handle specific errors
+      if (error.name === 'AbortError') {
+        return res.status(504).json({
+          error: 'Request timeout',
+          message: 'The edit took too long. Please try with a simpler request.'
+        });
+      }
+      
+      throw error;
+    }
+    
+  } catch (error) {
+    console.error('Error in /api/chat:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'Failed to edit code. Please try again.'
+    });
+  }
+});
+
 // 404 handler for undefined routes
 app.use((req, res) => {
   res.status(404).json({
