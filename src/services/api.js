@@ -1,4 +1,5 @@
 import axios from 'axios';
+import supabase from '../utils/supabase';
 
 // Create axios instance with base configuration
 const api = axios.create({
@@ -12,10 +13,21 @@ const api = axios.create({
 // Log the configured timeout
 console.log('API timeout configured:', api.defaults.timeout);
 
-// Request interceptor for logging
+// Request interceptor for logging and auth
 api.interceptors.request.use(
-  (config) => {
+  async (config) => {
     console.log('API Request:', config.method?.toUpperCase(), config.url);
+    
+    // Add auth header if user is logged in
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.access_token) {
+        config.headers.Authorization = `Bearer ${session.access_token}`;
+      }
+    } catch (error) {
+      console.error('Error getting auth session:', error);
+    }
+    
     return config;
   },
   (error) => {
@@ -67,11 +79,12 @@ api.interceptors.response.use(
 /**
  * Generate code using AI
  * @param {string} prompt - The user's prompt describing what code to generate
+ * @param {string} projectId - Optional project ID for version tracking
  * @returns {Promise<{success: boolean, code: string, language: string, framework: string}>}
  */
-export const generateCode = async (prompt) => {
+export const generateCode = async (prompt, projectId = null) => {
   try {
-    const response = await api.post('/api/generate', { prompt });
+    const response = await api.post('/api/generate', { prompt, projectId });
     return response.data;
   } catch (error) {
     // Re-throw with user-friendly message attached
@@ -123,14 +136,16 @@ export const explainCode = async (code) => {
  * @param {string|object} code - The current code (string for single file, object for multi-file)
  * @param {string} message - The user's edit request
  * @param {Array} history - The chat history for context
+ * @param {string} projectId - Optional project ID for version tracking
  * @returns {Promise<{success: boolean, code?: string, files?: object, isProject: boolean}>}
  */
-export const chatEdit = async (code, message, history = []) => {
+export const chatEdit = async (code, message, history = [], projectId = null) => {
   try {
     const response = await api.post('/api/chat', { 
       code, 
       message, 
-      history 
+      history,
+      projectId 
     });
     return response.data;
   } catch (error) {

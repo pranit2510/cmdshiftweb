@@ -8,6 +8,7 @@ import GenerationProgress from './GenerationProgress'
 import CodeExplainer from './CodeExplainer'
 import ComponentLibrary from './ComponentLibrary'
 import ChatInterface from './ChatInterface'
+import VersionHistory from './VersionHistory'
 import supabase from '../utils/supabase'
 import { generateCode, chatEdit } from '../services/api'
 import JSZip from 'jszip'
@@ -27,6 +28,9 @@ function Layout() {
   const [showProjects, setShowProjects] = useState(false)
   const [showComponentLibrary, setShowComponentLibrary] = useState(false)
   const [chatMessages, setChatMessages] = useState([])
+  const [showVersionHistory, setShowVersionHistory] = useState(false)
+  const [currentProjectId, setCurrentProjectId] = useState(null)
+  const [currentVersionNumber, setCurrentVersionNumber] = useState(null)
 
   // Check user auth status on mount
   useEffect(() => {
@@ -51,9 +55,28 @@ function Layout() {
   }
 
   const saveProject = async () => {
-    if (!user || !generatedCode || !prompt) return
+    // Check if we have generated code and prompt
+    if (!generatedCode || !prompt) {
+      setError('No code to save. Please generate some code first.')
+      return
+    }
 
     try {
+      // Get the current user from Supabase auth
+      const { data: { user: currentUser }, error: authError } = await supabase.auth.getUser()
+      
+      if (authError) {
+        console.error('Auth error:', authError)
+        setError('Authentication error. Please sign in again.')
+        return
+      }
+      
+      if (!currentUser) {
+        setError('You must be signed in to save projects.')
+        setShowAuth(true) // Open auth modal
+        return
+      }
+
       // Generate project name from first 30 characters of prompt
       const projectName = prompt.length > 30 
         ? prompt.substring(0, 30) + '...' 
@@ -63,7 +86,7 @@ function Layout() {
       const isMultiFile = typeof generatedCode === 'object' && !Array.isArray(generatedCode)
       
       const projectData = {
-        user_id: user.id,
+        user_id: currentUser.id,
         name: projectName,
         prompt: prompt,
         project_type: isMultiFile ? 'multi-file' : 'single-file'
@@ -76,17 +99,36 @@ function Layout() {
         projectData.code = generatedCode
       }
 
-      const { error } = await supabase
+      console.log('Saving project with data:', {
+        user_id: currentUser.id,
+        name: projectName,
+        project_type: projectData.project_type
+      })
+
+      const { data: savedProject, error } = await supabase
         .from('projects')
         .insert(projectData)
+        .select()
+        .single()
 
-      if (error) throw error
+      if (error) {
+        console.error('Supabase insert error:', error)
+        throw error
+      }
+
+      // Set the current project ID
+      if (savedProject && savedProject.id) {
+        setCurrentProjectId(savedProject.id)
+        setCurrentVersionNumber(savedProject.current_version || 1)
+        console.log('Project saved successfully:', savedProject.id)
+      }
 
       setSaveSuccess(true)
       setTimeout(() => setSaveSuccess(false), 3000)
     } catch (err) {
       console.error('Error saving project:', err)
-      setError('Failed to save project. Please try again.')
+      const errorMessage = err.message || 'Failed to save project. Please try again.'
+      setError(errorMessage)
     }
   }
 
@@ -127,6 +169,10 @@ function Layout() {
     // Set the prompt from the loaded project
     setPrompt(project.prompt)
     
+    // Set the current project ID and version
+    setCurrentProjectId(project.id)
+    setCurrentVersionNumber(project.current_version || 1)
+    
     // Load either files or code based on what's available
     if (project.files) {
       setGeneratedCode(project.files)
@@ -154,7 +200,11 @@ function Layout() {
     
     try {
       console.log('Generating code for prompt:', messagePrompt)
-      const response = await generateCode(messagePrompt)
+      console.log('Current project ID:', currentProjectId)
+      if (!currentProjectId) {
+        console.log('Note: No project ID - versions will not be saved until project is saved')
+      }
+      const response = await generateCode(messagePrompt, currentProjectId)
       
       if (response.success) {
         // Add assistant success message
@@ -207,7 +257,8 @@ function Layout() {
     
     try {
       console.log('Editing code with message:', editMessage)
-      const response = await chatEdit(generatedCode, editMessage, chatMessages)
+      console.log('Current project ID for edit:', currentProjectId)
+      const response = await chatEdit(generatedCode, editMessage, chatMessages, currentProjectId)
       
       if (response.success) {
         // Add assistant success message
@@ -342,11 +393,27 @@ function Layout() {
             <span className="text-white font-bold text-sm">CS</span>
           </div>
           <h1 className="text-xl font-semibold text-gray-900">CmdShift Web</h1>
+          {currentVersionNumber && (
+            <span className="text-sm text-gray-500 bg-gray-100 px-2 py-1 rounded">
+              v{currentVersionNumber}
+            </span>
+          )}
         </div>
         <div className="flex items-center space-x-4">
           {user ? (
             <>
               <span className="text-sm text-gray-600">{user.email}</span>
+              {currentProjectId && generatedCode && (
+                <button
+                  onClick={() => setShowVersionHistory(true)}
+                  className="text-sm bg-purple-100 hover:bg-purple-200 text-purple-700 px-4 py-2 rounded-lg transition-colors font-medium flex items-center gap-2"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
+                  </svg>
+                  History
+                </button>
+              )}
               <button
                 onClick={() => setShowProjects(true)}
                 className="text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-lg transition-colors font-medium"
@@ -434,6 +501,19 @@ function Layout() {
                   <path d="M7.707 10.293a1 1 0 10-1.414 1.414l3 3a1 1 0 001.414 0l3-3a1 1 0 00-1.414-1.414L11 11.586V6h5a2 2 0 012 2v7a2 2 0 01-2 2H4a2 2 0 01-2-2V8a2 2 0 012-2h5v5.586l-1.293-1.293zM9 4a1 1 0 012 0v2H9V4z" />
                 </svg>
                 <span>Save Project</span>
+              </button>
+            )}
+            
+            {/* Version History Button */}
+            {generatedCode && (
+              <button 
+                onClick={() => setShowVersionHistory(true)}
+                className="w-full bg-indigo-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-indigo-700 transition-colors duration-200 flex items-center justify-center space-x-2"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
+                </svg>
+                <span>Version History</span>
               </button>
             )}
             
@@ -557,6 +637,31 @@ function Layout() {
         isOpen={showComponentLibrary}
         onClose={() => setShowComponentLibrary(false)}
         onInsertComponent={handleInsertComponent}
+      />
+      
+      {/* Version History */}
+      <VersionHistory 
+        projectId={currentProjectId}
+        isOpen={showVersionHistory}
+        onClose={() => setShowVersionHistory(false)}
+        onRestore={(restoredCode) => {
+          // Update the generated code with restored version
+          setGeneratedCode(restoredCode)
+          
+          // Update version number if it's in the restored code metadata
+          // For now, we'll increment it since restore creates a new version
+          setCurrentVersionNumber(prev => (prev || 0) + 1)
+          
+          // Close the version history modal
+          setShowVersionHistory(false)
+          
+          // Add a message to chat
+          setChatMessages(prev => [...prev, {
+            role: 'assistant',
+            content: 'Project has been restored to the selected version. A new version has been created for this restore action.',
+            timestamp: new Date().toISOString()
+          }])
+        }}
       />
     </div>
   )

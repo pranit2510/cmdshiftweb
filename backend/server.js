@@ -5,6 +5,7 @@ import morgan from 'morgan';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import Anthropic from '@anthropic-ai/sdk';
+import { createClient } from '@supabase/supabase-js';
 
 // Load environment variables
 dotenv.config();
@@ -16,6 +17,12 @@ const __dirname = dirname(__filename);
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
+
+// Initialize Supabase client
+const supabase = createClient(
+  process.env.SUPABASE_URL || '',
+  process.env.SUPABASE_SERVICE_KEY || '' // Use service key for backend operations
+);
 
 // Initialize Express app
 const app = express();
@@ -29,6 +36,86 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
+
+// Helper function to save a project version
+async function saveProjectVersion(projectId, codeSnapshot, promptUsed) {
+  try {
+    // Prepare the code snapshot based on type
+    let snapshot;
+    if (typeof codeSnapshot === 'object' && !Array.isArray(codeSnapshot)) {
+      // Multi-file project - already in correct format
+      snapshot = codeSnapshot;
+    } else {
+      // Single file - wrap in object
+      snapshot = { 'main.jsx': codeSnapshot };
+    }
+
+    // Insert the version (version_number is auto-assigned by trigger)
+    const { data, error } = await supabase
+      .from('project_versions')
+      .insert({
+        project_id: projectId,
+        code_snapshot: snapshot,
+        prompt_used: promptUsed
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Error saving project version:', error);
+      throw error;
+    }
+
+    // Update the project's current version
+    const { error: updateError } = await supabase
+      .from('projects')
+      .update({ current_version: data.version_number })
+      .eq('id', projectId);
+
+    if (updateError) {
+      console.error('Error updating current version:', updateError);
+      throw updateError;
+    }
+
+    return data;
+  } catch (error) {
+    console.error('Failed to save project version:', error);
+    throw error;
+  }
+}
+
+// Helper function to verify user owns project
+async function verifyProjectOwnership(projectId, userId) {
+  const { data, error } = await supabase
+    .from('projects')
+    .select('user_id')
+    .eq('id', projectId)
+    .single();
+
+  if (error || !data) {
+    return false;
+  }
+
+  return data.user_id === userId;
+}
+
+// Helper function to get user from authorization header
+async function getUserFromAuth(authHeader) {
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null;
+  }
+
+  const token = authHeader.replace('Bearer ', '');
+  
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error) throw error;
+    return user;
+  } catch (error) {
+    console.error('Auth error:', error);
+    return null;
+  }
+}
 
 // Helper function to create prompt for Claude
 function createCodeGenerationPrompt(userPrompt, isRetry = false, truncationIssue = false) {
@@ -275,7 +362,8 @@ app.post('/api/generate', async (req, res) => {
   res.setTimeout(120000); // 2 minutes
   
   try {
-    const { prompt } = req.body;
+    const { prompt, projectId } = req.body;
+    const authHeader = req.headers.authorization;
 
     // Validate prompt
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
@@ -513,6 +601,21 @@ app.post('/api/generate', async (req, res) => {
           };
         }
         
+        // Save version if projectId is provided and user is authenticated
+        if (projectId && authHeader) {
+          try {
+            const user = await getUserFromAuth(authHeader);
+            if (user && await verifyProjectOwnership(projectId, user.id)) {
+              const codeToSave = responseData.files || responseData.code;
+              await saveProjectVersion(projectId, codeToSave, prompt);
+              console.log('[Generate] Version saved for project:', projectId);
+            }
+          } catch (versionError) {
+            // Log error but don't fail the request
+            console.error('[Generate] Failed to save version:', versionError);
+          }
+        }
+        
         // Success - return the response
         const elapsed = Date.now() - startTime;
         console.log(`[${new Date().toISOString()}] Generate request completed in ${elapsed}ms`);
@@ -593,7 +696,8 @@ app.post('/api/chat', async (req, res) => {
   res.setTimeout(120000); // 2 minutes
   
   try {
-    const { code, message, history } = req.body;
+    const { code, message, history, projectId } = req.body;
+    const authHeader = req.headers.authorization;
     
     // Validate input
     if (!code || !message) {
@@ -671,18 +775,31 @@ ${isMultiFile ? `Return the complete updated project as a JSON object with file 
 
 Return ONLY the ${isMultiFile ? 'JSON object' : 'code'}, no explanations or markdown.`;
     
-    try {
-      // Use Claude Opus 4 model
-      const model = process.env.ANTHROPIC_MODEL || 'claude-opus-4-20250514';
-      console.log(`[Chat Edit] Using model: ${model}`);
-      
-      // Create timeout controller
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 110000); // 110 seconds
-      
-      const claudeMessage = await anthropic.messages.create({
+    // Add retry logic for chat edits
+    let attempt = 0;
+    const maxAttempts = 2;
+    let lastError = null;
+    let hadTruncationIssue = false;
+    
+    while (attempt < maxAttempts) {
+      try {
+        const isRetry = attempt > 0;
+        
+        // Use Claude Opus 4 model
+        const model = process.env.ANTHROPIC_MODEL || 'claude-opus-4-20250514';
+        console.log(`[Chat Edit] Attempt ${attempt + 1}: Using model: ${model}`);
+        
+        // Adjust max tokens based on retry and truncation
+        const maxTokens = (isRetry && hadTruncationIssue) ? 4000 : 6000;
+        console.log(`[Chat Edit] Max tokens: ${maxTokens}`);
+        
+        // Create timeout controller
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 110000); // 110 seconds
+        
+        const claudeMessage = await anthropic.messages.create({
         model: model,
-        max_tokens: 6000,
+        max_tokens: maxTokens,
         temperature: 0.7,
         system: "You are a helpful coding assistant that makes specific edits to existing code based on user requests. Always preserve existing functionality unless asked to change it.",
         messages: [
@@ -691,7 +808,7 @@ Return ONLY the ${isMultiFile ? 'JSON object' : 'code'}, no explanations or mark
             content: editPrompt
           }
         ]
-      });
+      }, { signal: controller.signal });
       
       clearTimeout(timeoutId);
       
@@ -701,6 +818,111 @@ Return ONLY the ${isMultiFile ? 'JSON object' : 'code'}, no explanations or mark
       
       // Clean up markdown if present
       editedContent = editedContent.replace(/```json\n?/g, '').replace(/```javascript\n?/g, '').replace(/```\n?/g, '').trim();
+      
+      // Enhanced truncation detection (same as in generate endpoint)
+      const isJsonTruncated = (json) => {
+        let openBraces = 0;
+        let openBrackets = 0;
+        let inString = false;
+        let escapeNext = false;
+        
+        for (let i = 0; i < json.length; i++) {
+          const char = json[i];
+          
+          if (escapeNext) {
+            escapeNext = false;
+            continue;
+          }
+          
+          if (char === '\\') {
+            escapeNext = true;
+            continue;
+          }
+          
+          if (char === '"' && !inString) {
+            inString = true;
+          } else if (char === '"' && inString) {
+            inString = false;
+          }
+          
+          if (!inString) {
+            if (char === '{') openBraces++;
+            else if (char === '}') openBraces--;
+            else if (char === '[') openBrackets++;
+            else if (char === ']') openBrackets--;
+          }
+        }
+        
+        return openBraces > 0 || openBrackets > 0 || inString;
+      };
+      
+      // Function to repair truncated JSON
+      const repairTruncatedJson = (json) => {
+        let repaired = json;
+        let repairs = [];
+        
+        // Count unclosed structures
+        let openBraces = 0;
+        let openBrackets = 0;
+        let inString = false;
+        let lastStringStart = -1;
+        
+        for (let i = 0; i < json.length; i++) {
+          const char = json[i];
+          
+          if (char === '"' && (i === 0 || json[i-1] !== '\\')) {
+            if (!inString) {
+              inString = true;
+              lastStringStart = i;
+            } else {
+              inString = false;
+            }
+          }
+          
+          if (!inString) {
+            if (char === '{') openBraces++;
+            else if (char === '}') openBraces--;
+            else if (char === '[') openBrackets++;
+            else if (char === ']') openBrackets--;
+          }
+        }
+        
+        // Close unclosed string
+        if (inString) {
+          repaired += '"';
+          repairs.push('closed unclosed string');
+        }
+        
+        // Close unclosed arrays and objects
+        while (openBrackets > 0) {
+          repaired += ']';
+          openBrackets--;
+          repairs.push('closed unclosed array');
+        }
+        
+        while (openBraces > 0) {
+          repaired += '}';
+          openBraces--;
+          repairs.push('closed unclosed object');
+        }
+        
+        return { repaired, repairs };
+      };
+      
+      // Check if response is truncated
+      let wasRepaired = false;
+      let repairDetails = [];
+      
+      if (isMultiFile && isJsonTruncated(editedContent)) {
+        console.warn('[Chat Edit] Response appears to be truncated, attempting repair...');
+        
+        const { repaired, repairs } = repairTruncatedJson(editedContent);
+        editedContent = repaired;
+        wasRepaired = true;
+        repairDetails = repairs;
+        
+        console.log(`[Chat Edit] Applied repairs: ${repairs.join(', ')}`);
+      }
       
       let responseData;
       
@@ -715,13 +937,18 @@ Return ONLY the ${isMultiFile ? 'JSON object' : 'code'}, no explanations or mark
               success: true,
               files: parsedFiles,
               isProject: true,
-              timestamp: new Date().toISOString()
+              timestamp: new Date().toISOString(),
+              partial: wasRepaired,
+              repairs: wasRepaired ? repairDetails : undefined
             };
           } else {
             throw new Error('Invalid project structure');
           }
         } catch (jsonError) {
           console.error('[Chat Edit] JSON parse error:', jsonError.message);
+          if (wasRepaired) {
+            console.error('[Chat Edit] Repaired JSON still invalid:', jsonError.message);
+          }
           throw new Error('Failed to parse edited project files');
         }
       } else {
@@ -747,13 +974,37 @@ Return ONLY the ${isMultiFile ? 'JSON object' : 'code'}, no explanations or mark
         };
       }
       
+      // Save version if projectId is provided and user is authenticated
+      if (projectId && authHeader) {
+        try {
+          const user = await getUserFromAuth(authHeader);
+          if (user && await verifyProjectOwnership(projectId, user.id)) {
+            const codeToSave = responseData.files || responseData.code;
+            await saveProjectVersion(projectId, codeToSave, message);
+            console.log('[Chat Edit] Version saved for project:', projectId);
+          }
+        } catch (versionError) {
+          // Log error but don't fail the request
+          console.error('[Chat Edit] Failed to save version:', versionError);
+        }
+      }
+      
       // Success - return the response
       const elapsed = Date.now() - startTime;
       console.log(`[${new Date().toISOString()}] Chat edit request completed in ${elapsed}ms`);
       res.json(responseData);
+      return;
       
     } catch (error) {
-      console.error('[Chat Edit] Claude API Error:', error.message);
+      lastError = error;
+      attempt++;
+      console.error(`[Chat Edit] Attempt ${attempt} failed:`, error.message);
+      
+      // Check if it was a truncation issue
+      if (error.message.includes('parse') || error.message.includes('JSON')) {
+        hadTruncationIssue = true;
+        console.log('[Chat Edit] Detected potential truncation issue, will use lower token limit on retry');
+      }
       
       // Handle specific errors
       if (error.name === 'AbortError') {
@@ -763,14 +1014,223 @@ Return ONLY the ${isMultiFile ? 'JSON object' : 'code'}, no explanations or mark
         });
       }
       
-      throw error;
+      if (attempt >= maxAttempts) {
+        throw error;
+      }
+      
+      console.log(`[Chat Edit] Retrying attempt ${attempt + 1}...`);
     }
-    
+  }
+  
+  // If we get here, all attempts failed
+  console.error('[Chat Edit] All attempts failed');
+  res.status(500).json({
+    error: 'AI service error',
+    message: 'Failed to edit code. Please try again.',
+    details: process.env.NODE_ENV === 'development' ? lastError.message : undefined
+  });
+
   } catch (error) {
     console.error('Error in /api/chat:', error);
     res.status(500).json({
       error: 'Internal server error',
       message: 'Failed to edit code. Please try again.'
+    });
+  }
+});
+
+// API endpoint to get version history for a project
+app.get('/api/projects/:id/versions', async (req, res) => {
+  try {
+    const projectId = req.params.id;
+    const authHeader = req.headers.authorization;
+    
+    // Authenticate user
+    const user = await getUserFromAuth(authHeader);
+    if (!user) {
+      return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Authentication required'
+      });
+    }
+    
+    // Verify ownership
+    if (!await verifyProjectOwnership(projectId, user.id)) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'You do not have access to this project'
+      });
+    }
+    
+    // Get version history
+    const { data: versions, error } = await supabase
+      .from('project_versions')
+      .select('id, version_number, prompt_used, created_at')
+      .eq('project_id', projectId)
+      .order('version_number', { ascending: false });
+    
+    if (error) {
+      console.error('Error fetching versions:', error);
+      throw error;
+    }
+    
+    // Get current version from project
+    const { data: project } = await supabase
+      .from('projects')
+      .select('current_version')
+      .eq('id', projectId)
+      .single();
+    
+    res.json({
+      success: true,
+      versions: versions || [],
+      currentVersion: project?.current_version || 1
+    });
+    
+  } catch (error) {
+    console.error('Error in /api/projects/:id/versions:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'Failed to fetch version history'
+    });
+  }
+});
+
+// API endpoint to get a specific version
+app.get('/api/projects/:id/versions/:versionNumber', async (req, res) => {
+  try {
+    const { id: projectId, versionNumber } = req.params;
+    const authHeader = req.headers.authorization;
+    
+    // Authenticate user
+    const user = await getUserFromAuth(authHeader);
+    if (!user) {
+      return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Authentication required'
+      });
+    }
+    
+    // Verify ownership
+    if (!await verifyProjectOwnership(projectId, user.id)) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'You do not have access to this project'
+      });
+    }
+    
+    // Get specific version
+    const { data: version, error } = await supabase
+      .from('project_versions')
+      .select('*')
+      .eq('project_id', projectId)
+      .eq('version_number', parseInt(versionNumber))
+      .single();
+    
+    if (error || !version) {
+      return res.status(404).json({
+        error: 'Not found',
+        message: 'Version not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      version: version
+    });
+    
+  } catch (error) {
+    console.error('Error in /api/projects/:id/versions/:versionNumber:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'Failed to fetch version'
+    });
+  }
+});
+
+// API endpoint to restore a specific version
+app.post('/api/projects/:id/restore/:versionNumber', async (req, res) => {
+  try {
+    const { id: projectId, versionNumber } = req.params;
+    const authHeader = req.headers.authorization;
+    
+    // Authenticate user
+    const user = await getUserFromAuth(authHeader);
+    if (!user) {
+      return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Authentication required'
+      });
+    }
+    
+    // Verify ownership
+    if (!await verifyProjectOwnership(projectId, user.id)) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'You do not have access to this project'
+      });
+    }
+    
+    // Get the version to restore
+    const { data: version, error: versionError } = await supabase
+      .from('project_versions')
+      .select('code_snapshot')
+      .eq('project_id', projectId)
+      .eq('version_number', parseInt(versionNumber))
+      .single();
+    
+    if (versionError || !version) {
+      return res.status(404).json({
+        error: 'Not found',
+        message: 'Version not found'
+      });
+    }
+    
+    // Update the project with the version's code
+    const codeSnapshot = version.code_snapshot;
+    let updateData = {
+      current_version: parseInt(versionNumber)
+    };
+    
+    // Check if it's multi-file or single file
+    if (codeSnapshot && typeof codeSnapshot === 'object' && Object.keys(codeSnapshot).length > 1) {
+      updateData.files = codeSnapshot;
+      updateData.code = null;
+    } else {
+      // Single file - extract from wrapper object
+      const code = codeSnapshot['main.jsx'] || Object.values(codeSnapshot)[0] || '';
+      updateData.code = code;
+      updateData.files = null;
+    }
+    
+    const { error: updateError } = await supabase
+      .from('projects')
+      .update(updateData)
+      .eq('id', projectId);
+    
+    if (updateError) {
+      console.error('Error updating project:', updateError);
+      throw updateError;
+    }
+    
+    // Create a new version entry for the restore action
+    await saveProjectVersion(
+      projectId, 
+      codeSnapshot, 
+      `Restored to version ${versionNumber}`
+    );
+    
+    res.json({
+      success: true,
+      message: `Successfully restored to version ${versionNumber}`,
+      restoredCode: codeSnapshot
+    });
+    
+  } catch (error) {
+    console.error('Error in /api/projects/:id/restore/:versionNumber:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'Failed to restore version'
     });
   }
 });
