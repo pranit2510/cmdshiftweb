@@ -13,7 +13,20 @@ import supabase from '../utils/supabase'
 import { generateCode, chatEdit } from '../services/api'
 import JSZip from 'jszip'
 import { saveAs } from 'file-saver'
+import { CacheManager } from '../utils/cache'
 import '../styles/panels.css'
+
+// Create cache instance outside component to persist across renders
+const codeCache = new CacheManager('cmdshift_codegen_')
+
+// Template definitions for pre-caching
+const templatePrompts = [
+  { id: 'landing', prompt: 'Modern landing page with hero section, features grid, testimonials, and call-to-action buttons. Include smooth animations and mobile responsive design' },
+  { id: 'saas-startup', prompt: 'SaaS startup website with hero section, feature highlights with icons, pricing table with 3 tiers, customer testimonials carousel, FAQ section, and call-to-action for free trial' },
+  { id: 'restaurant', prompt: 'Restaurant website with hero image, menu sections with prices, opening hours, location map, photo gallery, reservation form, and contact information. Use warm colors and appetizing design' },
+  { id: 'real-estate', prompt: 'Real estate website with property search filters (location, price, bedrooms), property cards with images and details, featured properties section, agent contact forms, and mortgage calculator' },
+  { id: 'fitness', prompt: 'Fitness studio website with class schedule grid, trainer profiles with photos, membership pricing plans, transformation gallery, class booking form, and motivational hero section' }
+]
 
 function Layout() {
   const [prompt, setPrompt] = useState('')
@@ -31,6 +44,60 @@ function Layout() {
   const [showVersionHistory, setShowVersionHistory] = useState(false)
   const [currentProjectId, setCurrentProjectId] = useState(null)
   const [currentVersionNumber, setCurrentVersionNumber] = useState(null)
+  
+  // Function to pre-cache templates
+  const cacheTemplates = () => {
+    console.log('=== Pre-caching templates...')
+    let cachedCount = 0
+    let alreadyCachedCount = 0
+    
+    templatePrompts.forEach(template => {
+      const cacheKey = template.prompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').substring(0, 100)
+      
+      // Check if already cached
+      if (!codeCache.has(cacheKey)) {
+        // Pre-cache with a basic template response
+        const componentName = template.id.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join('')
+        const templateCode = `import React from 'react';
+
+export default function ${componentName}() {
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+      <div className="container mx-auto px-4 py-8">
+        <h1 className="text-4xl font-bold text-center mb-8">
+          ${componentName} Template
+        </h1>
+        <p className="text-center text-gray-600">
+          This is a pre-cached template for instant loading!
+        </p>
+      </div>
+    </div>
+  );
+}`
+        
+        const cacheData = {
+          code: templateCode,
+          files: null,
+          isProject: false
+        }
+        
+        console.log(`Pre-caching template ${template.id} with structure:`, {
+          hasCode: !!cacheData.code,
+          hasFiles: !!cacheData.files,
+          isProject: cacheData.isProject
+        })
+        
+        codeCache.set(cacheKey, cacheData, 7 * 24 * 60 * 60 * 1000) // Cache for 7 days
+        cachedCount++
+        console.log(`Cached template: ${template.id} with key: ${cacheKey}`)
+      } else {
+        alreadyCachedCount++
+        console.log(`Template ${template.id} already cached`)
+      }
+    })
+    
+    console.log(`=== Template caching complete. Cached ${cachedCount} new templates, ${alreadyCachedCount} already cached.`)
+  }
 
   // Check user auth status on mount
   useEffect(() => {
@@ -45,6 +112,15 @@ function Layout() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null)
     })
+
+    // Debug: Log all cache keys on mount
+    console.log('=== Cache Debug Info on Mount ===')
+    console.log('All cache keys:', codeCache.getAllCacheKeys())
+    console.log('Cache stats:', codeCache.getStats())
+    
+    // Pre-cache templates for instant loading
+    console.log('=== Checking if templates need caching...')
+    cacheTemplates()
 
     return () => subscription.unsubscribe()
   }, [])
@@ -133,6 +209,12 @@ function Layout() {
   }
 
   const handleTemplateSelect = async (templatePrompt) => {
+    console.log('=== Template selected, checking cache for:', templatePrompt)
+    
+    // Generate cache key to check for cached template
+    const cacheKey = templatePrompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').substring(0, 100)
+    const cachedResult = codeCache.get(cacheKey)
+    
     // Add template prompt as a user message
     const userMessage = {
       role: 'user',
@@ -141,13 +223,64 @@ function Layout() {
     }
     setChatMessages(prev => [...prev, userMessage])
     
+    // Check if we have a cached result
+    if (cachedResult) {
+      console.log('Template found in cache!', cachedResult)
+      console.log('Is cached result frozen?', Object.isFrozen(cachedResult))
+      
+      // Make sure no loading state is active
+      setIsLoading(false)
+      
+      // Clone the cached data to avoid read-only issues
+      console.log('=== About to set generated code from cache')
+      
+      if (cachedResult.files && cachedResult.isProject) {
+        // Deep clone files object
+        const clonedFiles = JSON.parse(JSON.stringify(cachedResult.files))
+        console.log('Setting multi-file template from cache')
+        setGeneratedCode(clonedFiles)
+        console.log('Multi-file template loaded from cache')
+      } else if (cachedResult.code) {
+        // String is immutable, but clone for safety
+        const clonedCode = String(cachedResult.code)
+        console.log('Setting single-file template from cache, code length:', clonedCode.length)
+        setGeneratedCode(clonedCode)
+        console.log('Single-file template loaded from cache')
+      }
+      
+      console.log('=== Generated code set successfully')
+      
+      // Add assistant message
+      const assistantMessage = {
+        role: 'assistant',
+        content: 'Template loaded instantly from cache! Feel free to customize it or ask for modifications.',
+        timestamp: new Date().toISOString()
+      }
+      setChatMessages(prev => [...prev, assistantMessage])
+      
+      // Set the prompt for consistency
+      setPrompt(templatePrompt)
+      
+      // Close the template gallery
+      setShowTemplates(false)
+      
+      // Ensure loading state is off
+      setIsLoading(false)
+      
+      console.log('=== Template loaded from cache, skipping API call')
+      return // Skip API call completely!
+    }
+    
+    // No cache hit, proceed with normal flow
+    console.log('Template not in cache, will call API')
+    
     // Set the prompt
     setPrompt(templatePrompt)
     
     // Close the template gallery
     setShowTemplates(false)
     
-    // Auto-generate code
+    // Auto-generate code via API
     setTimeout(() => handleGenerateCode(templatePrompt), 100)
   }
 
@@ -186,6 +319,8 @@ function Layout() {
 
   const handleGenerateCode = async (promptText = null) => {
     const messagePrompt = promptText || prompt
+    console.log('=== handleGenerateCode called ===')
+    console.log('Checking cache for prompt:', messagePrompt)
     
     // Clear previous error
     setError(null)
@@ -194,6 +329,53 @@ function Layout() {
     if (!messagePrompt.trim()) {
       setError('Please enter a prompt describing what you want to build.')
       return
+    }
+
+    // Generate cache key from prompt (simple sanitization)
+    const cacheKey = messagePrompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').substring(0, 100)
+    console.log('Cache key:', cacheKey)
+    
+    // Check cache first
+    const cachedResult = codeCache.get(cacheKey)
+    console.log('Cache result:', cachedResult)
+    console.log('=== handleGenerateCode cached result structure:', {
+      hasCode: !!cachedResult?.code,
+      hasFiles: !!cachedResult?.files,
+      isProject: !!cachedResult?.isProject,
+      keys: cachedResult ? Object.keys(cachedResult) : []
+    })
+    
+    if (cachedResult) {
+      console.log('CACHE HIT! Using cached result for prompt:', messagePrompt)
+      console.log('handleGenerateCode cached result details:', cachedResult)
+      console.log('Is cached result frozen?', Object.isFrozen(cachedResult))
+      
+      // Use cached code with proper cloning
+      if (cachedResult.files && cachedResult.isProject) {
+        // Deep clone files object
+        const clonedFiles = JSON.parse(JSON.stringify(cachedResult.files))
+        setGeneratedCode(clonedFiles)
+        console.log('Multi-file project loaded from cache')
+      } else if (cachedResult.code) {
+        // Clone string for safety
+        const clonedCode = String(cachedResult.code)
+        setGeneratedCode(clonedCode)
+        console.log('Code loaded from cache')
+        console.log('Code type:', typeof clonedCode)
+        console.log('Code length:', clonedCode?.length)
+      } else {
+        console.log('WARNING: handleGenerateCode cached result has no code or files!', cachedResult)
+      }
+      
+      // Add assistant message
+      const assistantMessage = {
+        role: 'assistant',
+        content: 'I\'ve generated the code for your request. You can view it in the preview panel on the right. Feel free to ask for any modifications or explanations!',
+        timestamp: new Date().toISOString()
+      }
+      setChatMessages(prev => [...prev, assistantMessage])
+      
+      return // Skip API call
     }
 
     setIsLoading(true)
@@ -207,6 +389,22 @@ function Layout() {
       const response = await generateCode(messagePrompt, currentProjectId)
       
       if (response.success) {
+        console.log('=== Got response from API, about to cache')
+        console.log('=== Response code length:', response.code ? response.code.length : 0)
+        console.log('=== Response has files:', !!response.files)
+        
+        // Cache the result with 24-hour TTL
+        const cacheData = {
+          code: response.code,
+          files: response.files,
+          isProject: response.isProject
+        }
+        codeCache.set(cacheKey, cacheData, 24 * 60 * 60 * 1000) // 24 hours in milliseconds
+        console.log('=== Cache set complete')
+        console.log('Caching result for:', cacheKey)
+        console.log('Cached data:', cacheData)
+        console.log('Code generation result cached for 24 hours')
+        
         // Add assistant success message
         const assistantMessage = {
           role: 'assistant',
@@ -247,6 +445,7 @@ function Layout() {
       setGeneratedCode('')
     } finally {
       setIsLoading(false)
+      console.log('=== handleGenerateCode finished')
     }
   }
 
@@ -302,6 +501,10 @@ function Layout() {
   }
 
   const handleSendMessage = async (messageContent) => {
+    console.log('=== handleSendMessage called with:', messageContent)
+    console.log('Message content:', messageContent)
+    console.log('Has existing code?', !!generatedCode)
+    
     // Add user message to chat
     const userMessage = {
       role: 'user',
@@ -312,12 +515,69 @@ function Layout() {
     
     // Check if we have existing code - if so, edit it; otherwise generate new
     if (generatedCode) {
-      // Edit existing code
+      console.log('Editing existing code...')
+      // Edit existing code - No caching for edits as they depend on current code state
       await handleEditCode(messageContent)
     } else {
-      // Generate new code
-      setPrompt(messageContent)
-      await handleGenerateCode(messageContent)
+      console.log('Generating new code...')
+      console.log('Checking cache in chat for:', messageContent)
+      
+      // Generate cache key from message (same as in generateCode)
+      const cacheKey = messageContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').substring(0, 100)
+      console.log('Chat cache key:', cacheKey)
+      
+      console.log('=== About to check cache, existing code?', !!generatedCode)
+      console.log('=== Cache key:', cacheKey)
+      
+      // Check cache first
+      const cachedResult = codeCache.get(cacheKey)
+      console.log('Chat cache result:', cachedResult)
+      console.log('=== Cached result structure:', {
+        hasCode: !!cachedResult?.code,
+        hasFiles: !!cachedResult?.files,
+        isProject: !!cachedResult?.isProject,
+        keys: cachedResult ? Object.keys(cachedResult) : []
+      })
+      
+      if (cachedResult) {
+        console.log('CACHE HIT in chat! Using cached result for:', messageContent)
+        console.log('Cached result details:', cachedResult)
+        
+        // Use cached code with proper cloning
+        if (cachedResult.files && cachedResult.isProject) {
+          // Deep clone files object
+          const clonedFiles = JSON.parse(JSON.stringify(cachedResult.files))
+          setGeneratedCode(clonedFiles)
+          console.log('Multi-file project loaded from cache (chat)')
+        } else if (cachedResult.code) {
+          // Clone string for safety
+          const clonedCode = String(cachedResult.code)
+          setGeneratedCode(clonedCode)
+          console.log('Code loaded from cache (chat)')
+        } else {
+          console.log('WARNING: Cached result has no code or files!', cachedResult)
+        }
+        
+        // Add assistant message
+        const assistantMessage = {
+          role: 'assistant',
+          content: 'I\'ve generated the code for your request. You can view it in the preview panel on the right. Feel free to ask for any modifications or explanations!',
+          timestamp: new Date().toISOString()
+        }
+        setChatMessages(prev => [...prev, assistantMessage])
+        
+        // Update prompt for consistency
+        setPrompt(messageContent)
+        
+        // IMPORTANT: Return early to skip API call!
+        console.log('=== Skipping API call, using cached result')
+        return
+      } else {
+        // No cache hit, proceed with generation
+        console.log('No cache hit in chat, calling generateCode...')
+        setPrompt(messageContent)
+        await handleGenerateCode(messageContent)
+      }
     }
   }
 
@@ -533,6 +793,84 @@ function Layout() {
                 
                 {/* Code Explainer Button */}
                 <CodeExplainer code={generatedCode} isVisible={true} />
+              </div>
+            )}
+            
+            {/* Debug Cache Button - Only in development */}
+            {import.meta.env.DEV && (
+              <div className="space-y-2">
+                <button
+                  onClick={() => {
+                    console.log('=== Cache Debug Info ===')
+                    const stats = codeCache.getStats()
+                    console.log('Cache stats:', stats)
+                    console.log(`Total entries: ${stats.totalEntries}`)
+                    console.log(`Valid entries: ${stats.validEntries}`)
+                    console.log(`Expired entries: ${stats.expiredEntries}`)
+                    console.log(`Total size: ${(stats.totalSize / 1024).toFixed(2)} KB`)
+                    
+                    console.log('\n=== Cached Prompts ===')
+                    const keys = codeCache.getAllCacheKeys()
+                    if (keys.length === 0) {
+                      console.log('No cached prompts found')
+                    } else {
+                      keys.forEach((key, index) => {
+                        const strippedKey = key.replace('cmdshift_codegen_', '')
+                        const value = localStorage.getItem(key)
+                        if (value) {
+                          try {
+                            const parsed = JSON.parse(value)
+                            console.log(`\n${index + 1}. Cache key: ${strippedKey}`)
+                            console.log(`   Cached at: ${new Date(parsed.timestamp).toLocaleString()}`)
+                            console.log(`   Expires: ${parsed.expiry ? new Date(parsed.expiry).toLocaleString() : 'Never'}`)
+                            console.log(`   Has code: ${!!parsed.value?.code}`)
+                            console.log(`   Has files: ${!!parsed.value?.files}`)
+                            console.log(`   Is project: ${!!parsed.value?.isProject}`)
+                            
+                            // Try to find original prompt by checking recent messages
+                            const recentMessages = chatMessages.filter(m => m.role === 'user').slice(-10)
+                            const matchingPrompt = recentMessages.find(m => {
+                              const msgKey = m.content.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').substring(0, 100)
+                              return msgKey === strippedKey
+                            })
+                            if (matchingPrompt) {
+                              console.log(`   Original prompt: "${matchingPrompt.content.substring(0, 50)}..."`)
+                            }
+                          } catch (e) {
+                            console.log(`Error parsing cache entry ${key}:`, e)
+                          }
+                        }
+                      })
+                    }
+                    
+                    console.log('\n=== End Cache Debug ===')
+                  }}
+                  className="w-full bg-gray-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-gray-700 transition-colors duration-200 text-sm"
+                >
+                  Debug Cache (See Console)
+                </button>
+                
+                <button
+                  onClick={() => {
+                    if (confirm('Are you sure you want to clear the cache? This will remove all cached prompts and templates.')) {
+                      console.log('=== Clearing cache ===')
+                      
+                      // Clear all cache
+                      codeCache.clear()
+                      console.log('Cache cleared successfully')
+                      
+                      // Re-cache templates
+                      console.log('Re-caching templates...')
+                      cacheTemplates()
+                      
+                      console.log('=== Cache cleared and templates re-cached ===')
+                      alert('Cache cleared and templates re-cached!')
+                    }
+                  }}
+                  className="w-full bg-red-600 text-white py-2 px-4 rounded-lg font-medium hover:bg-red-700 transition-colors duration-200 text-sm"
+                >
+                  Clear Cache
+                </button>
               </div>
             )}
           </div>
