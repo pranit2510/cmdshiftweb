@@ -18,11 +18,18 @@ function VersionHistory({ projectId, isOpen, onClose, onRestore }) {
     console.log('isOpen:', isOpen)
     console.log('projectId:', projectId)
     
-    if (isOpen && projectId) {
-      console.log('Conditions met, fetching version history...')
-      fetchVersionHistory()
+    if (isOpen) {
+      if (projectId) {
+        console.log('Conditions met, fetching version history...')
+        fetchVersionHistory()
+      } else {
+        console.log('No projectId, showing empty state')
+        setLoading(false)
+        setVersions([])
+        setError(null)
+      }
     } else {
-      console.log('Conditions not met:', { isOpen, projectId })
+      console.log('Modal not open')
     }
   }, [isOpen, projectId])
 
@@ -240,7 +247,7 @@ function VersionHistory({ projectId, isOpen, onClose, onRestore }) {
               </div>
             ) : versions.length === 0 ? (
               <div className="text-center py-12">
-                <p className="text-gray-400">No version history available yet.</p>
+                <p className="text-gray-400">No version history available yet. Save your project first, then make changes to create versions.</p>
               </div>
             ) : (
               <div className="space-y-4">
